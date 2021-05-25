@@ -52,7 +52,6 @@ gateway_params = {
 
 # Constants
 MAX_PAGES = math.ceil(math.pow(2, 18))
-# MAX_PAGES = 2
 MAX_LIMIT = 100
 BACKOFF_TIME_LIMIT = 256
 
@@ -63,8 +62,7 @@ timeout_count = 0
 min_limit_reached = 100
 
 # Globals used for changing url parameters
-next_page_id = 299097947
-# next_page_id = None
+next_page_id = None
 
 # Logging
 logging.basicConfig(filename='EAPI_paging.log', level=logging.INFO)
