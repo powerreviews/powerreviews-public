@@ -2,7 +2,7 @@
 This project contains test scripts and assorted code for using PowerReviews public APIs.
 
 ## Enterprise API
-enterprise_api_reviews_paging.py
+EAPI.py
 
 ### Requirements
 Python 3.x
