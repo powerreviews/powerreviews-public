@@ -138,3 +138,64 @@ Derived from git history; current HEAD is `3d3ac06`.
 - **Activity level**: 0 commits in the last 90 days on HEAD. (Two later commits exist on un-merged remote branches: `91bd8b6` certifi bump on 2022-12-08 and `9ebd7f8` `.whitesource` config on 2026-03-23. Neither is reachable from HEAD `3d3ac06`.)
 - **Hot spots** (last 6 months, on HEAD): _None — no commits on HEAD in the last 6 months._ Across the entire history of HEAD, the only churn is `py/EAPI.py` (3 commits) and `requirements.txt` (2 commits).
 - **Recent major changes**: _No major changes in the last 6 months._ The repository has been effectively dormant since 2021-06-05; only un-merged dependabot/whitesource activity exists after that on the remote.
+
+---
+
+## Revised Summary
+_Revised on 2026-05-12 against commit 494840e_
+
+### Overview
+`powerreviews-public` is the org's only externally distributed code artifact: a single Python reference script (`py/EAPI.py`) that demonstrates OAuth2 client-credentials auth, cursor-based paging, exponential backoff, and adaptive `limit` shrinking against the PowerReviews **Enterprise API** (`enterprise-api.powerreviews.com`). It is consumed by enterprise customers / integration partners learning how to pull reviews and Q&A UGC programmatically; the upstream API itself is served by the org's `enterprise-services` (Kotlin/Spring Boot, syndication-db backed) — this repo is a thin client *to* that service, not a component *of* it. Within the org it is a CLI Tools repo (per the org catalog), pairs conceptually with `pwr-scripts` (which also has internal "EAPI tasks"), and is structurally unrelated to the same-named-prefix `powerreviews-pufferfish` legacy monolith.
+
+### Tech Stack
+| Category | Technology | Version |
+|----------|-----------|---------|
+| Language | Python | 3.x (unpinned) |
+| Framework | requests + getopt (stdlib CLI) | requests 2.25.1 |
+| Database | None | N/A |
+| Build Tool | pip / requirements.txt | N/A |
+| CI/CD | None on HEAD (Mend/WhiteSource + Dependabot configured on unmerged remote branches only) | N/A |
+| Cloud/Infra | None (script targets a hosted HTTPS endpoint owned by `enterprise-services`) | N/A |
+
+### Consumers
+| Consumer | Type | How They Use It |
+|----------|------|----------------|
+| PowerReviews enterprise customers / integration partners | External developers | Public reference for implementing OAuth2 + paging against `enterprise-api.powerreviews.com` (the only public-facing repo in the org alongside `corpsite`, `Documentation-Output`, `api-documentation`) |
+| Internal QA / SE / support engineers | Org users | Ad-hoc smoke testing of the Enterprise API across `dev-`, `qa-`, and `prod` hostnames |
+| `enterprise-services` team | Org service team | Indirect — the script exercises their public surface and serves as customer-facing usage documentation |
+
+### Dependencies on Org Repos
+| Repo | Reason |
+|------|--------|
+| `enterprise-services` | Runtime upstream — script exclusively calls `enterprise-api.powerreviews.com/v1/{reviews,questions}` and `/oauth2/token`, which is the public B2B Kotlin/Spring Boot service backed by syndication-db. No source-level coupling, but the API contract (paging cursor `next_page`, `count`, `media[].type`, `merchant_responses[]`) is owned by that repo. |
+| `pwr-scripts` | Conceptual overlap — the org catalog describes `pwr-scripts` as containing "ad-hoc Python ops scripts for ... EAPI tasks." Likely the internal-facing twin of this public script; any drift in the EAPI contract is felt in both. |
+| `denormalization-services` / `syndication-db` ecosystem | Indirect data lineage — the reviews/questions returned upstream originate from `core-data-services` → SNS `pwr-event-log` → `denormalization-services` → `syndication-db`, which `enterprise-services` reads from. Not a source dependency, but explains the data the script counts. |
+| `whitesource-config` | Org-wide Mend scan policy — referenced on the unmerged `whitesource/configure` remote branch (not on HEAD `494840e`). |
+
+### Upgrade Alerts
+| Dependency | Current Version | Issue | Severity |
+|-----------|----------------|-------|----------|
+| requests | 2.25.1 | CVE-2023-32681 — Proxy-Authorization header leak on redirect; fixed in 2.31.0. Especially severe here because this is a script *published to external partners* — every consumer inherits the CVE. | Critical |
+| urllib3 | 1.26.5 | CVE-2023-43804 / CVE-2023-45803 (Cookie / Authorization header leak across redirects) and CVE-2024-37891 (proxy auth) all post-date the pinned version on the 1.x branch. | Critical |
+| certifi | 2020.12.5 | CVE-2022-23491 — bundled e-Tugra root trust; fixed in 2022.12.7. A dependabot bump PR exists on the remote but is unmerged on HEAD. | Critical |
+| idna | 3.1 | CVE-2024-3651 — DoS via crafted `idna.encode()` input; fixed in 3.7. | Critical |
+| Python runtime | 3.x unpinned (README says "Python 3.x") | 3.6/3.7/3.8 all EOL; no minimum version pin. Script uses 3.6+ f-strings and `time.time_ns()` (3.7+) but does not declare it. | Severe |
+| Repo maintenance | HEAD last touched 2021-06-05; Dependabot/WhiteSource branches stranded unmerged for years | EOL-by-neglect — the public-facing example is effectively abandoned while CVEs accumulate. | Severe |
+
+### Coupling Profile
+| Dependency | Protocol | Frequency Pattern | Failure Mode |
+|-----------|----------|-------------------|--------------|
+| `enterprise-services` `/v1/{reviews,questions}` | sync HTTP (REST, JSON, single-connection `requests.Session` with `pool_maxsize=1`) | per-request, sequential paging up to `--max_pages`, no parallelism | soft on 5xx (exponential backoff 1→256 s, adaptive `limit` halving toward 1, doubling back toward `MAX_LIMIT=100` on success); soft on 401 (single re-auth retry); hard once `BACKOFF_TIME_LIMIT=256s` is exceeded (raises) |
+| `enterprise-services` `/oauth2/token` | sync HTTP (OAuth2 `client_credentials`, HTTP Basic) | startup-only, plus on-demand re-auth on a mid-paging 401 | hard — non-200 raises immediately; blank `client_id`/`client_secret` raises before request |
+| Local filesystem (per-run `.log` file) | file/object store (local fs) | per-invocation | hard — Python logging will surface IOError, but no recovery; `.log` files are git-ignored |
+
+Notes worth flagging for an architect:
+- The `Authorization:` header is set to the raw `access_token` **without a `Bearer ` prefix** (line 130). If `enterprise-services` ever tightens RFC 6750 compliance, every external customer who copy-pasted this reference breaks. This is a public-facing contract risk, not an internal one.
+- Coupling is purely contract-level (no shared DB, no shared queue, no shared library) — the cheapest possible coupling, but invisible to internal refactors of `enterprise-services` unless they consider the published example.
+
+### Architectural Notes
+- **Shared infrastructure**: None directly. The data the script consumes flows through the heavily shared infrastructure called out in the org summary — `syndication-db` Postgres (consumed by `denormalization-services`, `distribution-services`, `enterprise-services`, `db-syndication-ad-hoc-migrations`) and the `pwr-event-log` SNS topic that fans out from `core-data-services` — but this repo touches none of it directly.
+- **Bounded-context overlaps**: The response shape it parses (`reviews[]`, `questions[]`, nested `media[].type`, `merchant_responses[]`, `count`, `next_page`) is the canonical Enterprise API surface, which is itself a projection of the UGC domain owned by `core-data-services` / `pwr-data-model`. The string-typed `media.type` enum the script branches on (`image`/`video`/`answer`) is mirrored in `pwr-data-model` and `pwr-js-utils`; any rename there silently breaks this client.
+- **Public-surface positioning**: Within the 227-repo catalog this is one of only ~4 truly external-facing artifacts (with `corpsite`, `Documentation-Output`, `api-documentation`). It is the *only* one shipping executable example code to customers, which materially raises the bar for the unpatched CVEs above.
+- **Architectural evolution**: Git history shows two bursts only — initial drop on 2021-05-25 (single-file script), CLI/backoff polish on 2021-06-05 (`85ea779`), then dormancy. Subsequent activity is entirely automated: a 2022-12 Dependabot certifi bump and a 2026-03 WhiteSource config commit, both stranded on unmerged remote branches. Effectively orphaned: no owner has merged maintenance in 4+ years despite the repo being public and externally consumed.
+- **Naming collision risk**: Do not confuse this repo with `powerreviews-pufferfish` (the legacy Java/Spring/Hibernate monolith) — the names share a prefix but the repos have zero relationship in code, ownership, or runtime.
